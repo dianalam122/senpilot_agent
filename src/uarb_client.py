@@ -100,7 +100,13 @@ def goto_matter(page: Page, matter_number: str) -> tuple[Frame | None, bool]:
     # Attach diagnostic listeners before navigation
     page.on("console", lambda msg: log.info("CONSOLE[%s]: %s", msg.type, msg.text))
     page.on("pageerror", lambda err: log.error("PAGEERROR: %s", err))
-    page.on("requestfailed", lambda req: log.warning("REQFAILED: %s - %s", req.url, req.failure))
+    def _on_request_failed(req):
+        fail_str = str(req.failure) if req.failure else ""
+        if "/dl/" in req.url and "ERR_ABORTED" in fail_str:
+            return  # Ignore aborted download requests; download may still succeed
+        log.warning("REQFAILED: %s - %s", req.url, req.failure)
+
+    page.on("requestfailed", _on_request_failed)
     page.on(
         "response",
         lambda res: log.warning("RESPONSE %d: %s", res.status, res.url)

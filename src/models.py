@@ -60,3 +60,12 @@ class DownloadTarget(BaseModel):
 
     name: str = ""
     selector: str = ""  # or id for Playwright to click
+
+
+class DownloadResult(BaseModel):
+    """Result of download_targets run."""
+
+    requested: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    saved_paths: list[str] = []
