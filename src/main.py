@@ -3,10 +3,15 @@
 
 import argparse
 import logging
+import os
+
+from playwright.sync_api import sync_playwright
 
 from .models import Request
 from .parser import parse_request
 from .render import render_clarification_email
+from .downloader import download_targets
+from .zipper import make_zip
 from .uarb_client import fetch_matter_metadata_and_counts, list_download_targets
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -48,18 +53,42 @@ def run(email_text: str, reply_to: str | None) -> None:
         summary.metadata,
     )
 
-    if request.document_type:
-        targets = list_download_targets(
-            request.matter_number, request.document_type, limit=10
-        )
-        log.info("Download targets: %d items", len(targets))
-        for t in targets[:3]:  # log first 3
-            log.info("  Target: name=%s, selector=%s", t.name, t.selector)
-        if len(targets) > 3:
-            log.info("  ... and %d more", len(targets) - 3)
+    if not request.document_type:
+        print(f"Valid request: {request.matter_number} (no doc type)")
+        return
 
-    # TODO: download_targets, make_zip, send_email
-    print(f"Valid request: {request.matter_number} / {request.document_type}")
+    targets = list_download_targets(
+        request.matter_number, request.document_type, limit=10
+    )
+    log.info("Download targets: %d items", len(targets))
+    if not targets:
+        print(f"No documents available for {request.matter_number} / {request.document_type}")
+        return
+
+    for t in targets[:3]:
+        log.info("  Target: name=%s, selector=%s", t.name, t.selector)
+    if len(targets) > 3:
+        log.info("  ... and %d more", len(targets) - 3)
+
+    out_dir = os.path.join("output", request.matter_number, request.document_type)
+    os.makedirs(out_dir, exist_ok=True)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+        )
+        page = context.new_page()
+        result = download_targets(
+            page, request.matter_number, request.document_type, targets, out_dir
+        )
+        browser.close()
+
+    zip_path = os.path.join("output", request.matter_number, f"{request.document_type}.zip")
+    make_zip(out_dir, zip_path)
+
+    log.info("Downloaded %d/%d, zipped at %s", result.succeeded, result.requested, zip_path)
+    print(f"Downloaded {result.succeeded}/{result.requested}, zipped at {zip_path}")
 
 
 def main() -> None:
