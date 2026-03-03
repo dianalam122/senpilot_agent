@@ -28,7 +28,7 @@ Set these environment variables:
 | `SMTP_PASS` | SMTP password                 | (app password)   |
 | `SMTP_FROM` | From address (optional)       | `you@gmail.com`  |
 
-# For security reasons, SMTP credentials are not included in this repository!
+#### For security reasons, SMTP credentials are not included in this repository!
 
 **Gmail users**: Use an [App Password](https://support.google.com/accounts/answer/185833), not your regular account password. Enable 2FA first, then generate an app password under Security → App passwords.
 
