@@ -150,12 +150,13 @@ def goto_matter(page: Page, matter_number: str) -> tuple[Frame | None, bool]:
     log.info("Main frame: <input>=%d, <textarea>=%d, [contenteditable=true]=%d, <iframe>=%d",
              n_inputs, n_textareas, n_contenteditable, n_iframes)
 
-    page.wait_for_load_state("networkidle", timeout=15000)
+    page.wait_for_load_state("domcontentloaded", timeout=10000)
 
-    # 1) card = Go Directly to Matter card (must include text "Go Directly to Matter")
+    # 1) card = Go Directly to Matter card: must include "Go Directly to Matter" AND visible text /eg\s*M0?\d+/i
+    eg_pattern = re.compile(r"eg\s*M0?\d+", re.I)
     header = page.get_by_text("Go Directly to Matter", exact=False).first
     if header.count() == 0:
-        log.warning("Could not find 'Go Directly to Matter' heading")
+        log.warning("UI_LOCATION_FAILED: Could not find 'Go Directly to Matter' heading")
         page.screenshot(path="debug_uarb.png", full_page=True)
         return None, True
     card = None
@@ -165,7 +166,9 @@ def goto_matter(page: Page, matter_number: str) -> tuple[Frame | None, bool]:
             break
         try:
             anc_text = anc.first.inner_text()
-            if "Go Directly to Matter" in anc_text and anc.get_by_role("button", name=re.compile("Search", re.I)).count() > 0:
+            has_heading = "Go Directly to Matter" in anc_text
+            has_eg = bool(eg_pattern.search(anc_text))
+            if has_heading and has_eg and anc.get_by_role("button", name=re.compile("Search", re.I)).count() > 0:
                 card = anc
                 break
         except Exception:
@@ -177,48 +180,69 @@ def goto_matter(page: Page, matter_number: str) -> tuple[Frame | None, bool]:
 
     try:
         card_text = card.first.inner_text()
-        log.info("Card text includes 'Go Directly to Matter': %s", "Go Directly to Matter" in card_text)
+        log.info("Card text includes 'Go Directly to Matter': %s, eg placeholder: %s",
+                 "Go Directly to Matter" in card_text, bool(eg_pattern.search(card_text)))
     except Exception:
         pass
 
-    # 2) field = within card, first visible textbox-like element (matter input)
-    placeholder_pattern = re.compile(r"eg\s*M0?\d+", re.I)
-    field = card.get_by_placeholder(placeholder_pattern).first
-    if field.count() == 0:
-        field = card.locator('.fm-textarea:has-text("eg M01234"), :has(.placeholder:has-text("eg M01234")), input, textarea').first
-    if field.count() == 0:
-        field = card.get_by_role("textbox").first
-    if field.count() == 0:
-        log.warning("Could not find matter input field in card")
+    # 2) Field: click 'eg M01234' text then keyboard.type; fallback to first focusable in card
+    eg_text = card.get_by_text(eg_pattern).first
+    field_clicked = False
+    if eg_text.count() > 0 and eg_text.first.is_visible():
+        try:
+            eg_text.click()
+            field_clicked = True
+            log.info("Clicked 'eg M01234' placeholder text")
+        except Exception:
+            pass
+    if not field_clicked:
+        focusable = card.locator("input, textarea, [tabindex='0'], [contenteditable='true']").first
+        if focusable.count() > 0 and focusable.first.is_visible():
+            try:
+                focusable.click()
+                field_clicked = True
+                log.info("Clicked first focusable element in card")
+            except Exception:
+                pass
+    if not field_clicked:
+        log.warning("UI_LOCATION_FAILED: Could not focus matter input (eg text or focusable)")
         page.screenshot(path="debug_uarb.png", full_page=True)
         return None, True
 
-    # 3) search_btn = within card, pick nearest Search button to field (exclude navbar)
-    search_btn = _pick_nearest_search_button(card, field)
-    log.info("Search buttons in card: 1 chosen (nearest to field)")
-
-    # 4) Click field, clear it (Ctrl+A or Cmd+A then Backspace), type matter number
-    field.first.click()
     select_all = "Meta+a" if platform.system() == "Darwin" else "Control+a"
     page.keyboard.press(select_all)
     page.keyboard.press("Backspace")
     page.keyboard.type(matter_number)
     log.info("Entered matter %s (cleared + typed)", matter_number)
 
-    # 5) Click Search button (nearest to field, inside card only)
+    # 3) search_btn = within card, pick nearest Search button
+    field_for_btn = card.get_by_text(eg_pattern).first
+    if field_for_btn.count() == 0:
+        field_for_btn = card.locator("input, textarea, [tabindex='0']").first
+    search_btn = _pick_nearest_search_button(card, field_for_btn)
+    log.info("Search buttons in card: 1 chosen (nearest to field)")
+
+    # 4) Click Search button
     if search_btn and search_btn.count() > 0:
         search_btn.click()
         log.info("Clicked Search button (nearest to field)")
     else:
-        log.warning("No Search button in card, pressing Enter")
+        log.warning("UI_LOCATION_FAILED: No Search button in card, pressing Enter")
         page.keyboard.press("Enter")
 
     frame = page.main_frame
 
-    # 5) Wait for Matter page (heading/label) OR tab row (Exhibits, Key Documents, etc.)
-    page.wait_for_load_state("networkidle", timeout=15000)
-    page.wait_for_timeout(3000)
+    # 5) Wait for tab buttons (Label - N pattern); success if >= 5
+    tab_buttons_loc = frame.locator("button").filter(has_text=re.compile(r".+\s-\s\d+"))
+    try:
+        tab_buttons_loc.nth(4).wait_for(state="visible", timeout=15000)
+        log.info("Tab buttons visible (>=5) (search success)")
+        return frame, False
+    except Exception:
+        pass
 
+    # Fallback: check for matter heading in body
+    page.wait_for_load_state("domcontentloaded", timeout=5000)
     page_text = ""
     try:
         page_text = page.locator("body").first.inner_text()
@@ -226,30 +250,25 @@ def goto_matter(page: Page, matter_number: str) -> tuple[Frame | None, bool]:
         pass
     page_text_lower = page_text.lower()
 
-    # Success: Matter page heading/label OR tab row
     matter_heading = re.search(r"matter\s+no\.?\s*[:\s]*[Mm]\d{4,}", page_text, re.I)
-    tabs_present = any(
-        t.lower() in page_text_lower
-        for t in ["Exhibits", "Key Documents", "Other Documents", "Transcripts", "Recordings"]
-    )
-    if matter_heading or tabs_present:
-        log.info("Search success: matter_heading=%s, tabs_present=%s", bool(matter_heading), tabs_present)
+    tabs_by_role = tab_buttons_loc.count() >= 5
+    if matter_heading or tabs_by_role:
+        log.info("Search success: matter_heading=%s, tabs_by_role=%s", bool(matter_heading), tabs_by_role)
         return frame, False
 
-    # Not-found only if explicit message
+    # Not-found only if explicit message (do not treat UI location failures as matter not found)
     not_found_patterns = ["no records found", "no results", "matter not found"]
     for pat in not_found_patterns:
         if pat in page_text_lower:
             log.info("Matter not found: '%s' detected", pat)
             return frame, True
 
-    # Not-found if page remains on search screen
-    still_on_search = "Go Directly to Matter" in page_text and not tabs_present
+    # Page still on search screen
+    still_on_search = "Go Directly to Matter" in page_text and not tabs_by_role
     if still_on_search:
         log.warning("Page remains on search screen; treating as not found")
         return frame, True
 
-    # Page changed but markers unclear - assume success
     log.info("Page changed; assuming success")
     return frame, False
 
@@ -320,28 +339,41 @@ def fetch_matter_metadata_and_counts(matter_number: str) -> MatterSummary:
             if metadata:
                 log.info("Metadata found: %s", metadata)
 
-            # Get counts per tab - use get_by_role/get_by_text for tabs
-            for doc_type in DOCUMENT_TYPES:
-                tab_label = DOC_TYPE_TO_TAB[doc_type]
-                tab_loc = frame.get_by_role("tab", name=re.compile(tab_label, re.I))
-                if tab_loc.count() == 0:
-                    tab_loc = frame.get_by_text(tab_label, exact=True)
-                if tab_loc.count() == 0:
-                    tab_loc = frame.get_by_text(re.compile(tab_label, re.I))
+            # Tab discovery: buttons with "Label - N" pattern
+            tab_buttons = frame.locator("button").filter(has_text=re.compile(r".+\s-\s\d+"))
+            count = tab_buttons.count()
+            log.info("Tab buttons count: %d", count)
 
-                if tab_loc.count() > 0 and tab_loc.first.is_visible():
-                    try:
-                        tab_loc.first.click()
-                        page.wait_for_timeout(800)  # allow tab content to load
-                        n = frame.get_by_role("link", name="Go Get It").count()
-                        if n == 0:
-                            n = frame.get_by_role("button", name="Go Get It").count()
-                        counts[doc_type] = n
-                        log.info("Tab %s: count=%d (selector: tab with text)", tab_label, n)
-                    except Exception as e:
-                        log.debug("Tab %s: %s", tab_label, e)
-                else:
-                    log.info("Tab %s: not found or not visible, count=0", tab_label)
+            _TAB_COUNT_REGEX = re.compile(r"^(.*?)\s*-\s*(\d+)\s*$")
+            _LABEL_TO_DOC_TYPE = [
+                ("exhibit", "exhibits"),
+                ("key", "key_documents"),
+                ("other", "other_documents"),
+                ("transcript", "transcripts"),
+                ("record", "recordings"),
+            ]
+
+            discovered_tab_texts: list[str] = []
+            for i in range(min(count, 20)):
+                try:
+                    txt = tab_buttons.nth(i).inner_text().strip()
+                    txt = " ".join(txt.split())
+                    discovered_tab_texts.append(txt)
+                    m = _TAB_COUNT_REGEX.match(txt)
+                    if not m:
+                        continue
+                    label = m.group(1).strip()
+                    count_val = int(m.group(2))
+                    label_lower = label.lower()
+                    for keyword, doc_type in _LABEL_TO_DOC_TYPE:
+                        if keyword in label_lower:
+                            counts[doc_type] = count_val
+                            break
+                except Exception as e:
+                    log.debug("Tab button %d: %s", i, e)
+
+            log.info("Discovered tab button texts: %s", discovered_tab_texts)
+            log.info("Extracted counts per canonical type: %s", counts)
 
             return MatterSummary(
                 matter_id=matter_number,
