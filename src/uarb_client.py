@@ -5,7 +5,7 @@ import logging
 import platform
 import re
 
-from playwright.sync_api import Frame, Locator, Page, sync_playwright
+from playwright.sync_api import Frame, Locator, Page
 
 from .models import DOCUMENT_TYPES, DOC_TYPE_TO_TAB, DownloadTarget, MatterSummary
 
@@ -279,187 +279,171 @@ def goto_matter(page: Page, matter_number: str) -> tuple[Frame | None, bool]:
     return frame, False
 
 
-def fetch_matter_metadata_and_counts(matter_number: str) -> MatterSummary:
+def fetch_matter_metadata_and_counts(page: Page, matter_number: str) -> MatterSummary:
     """
-    Open UARB, search matter, scrape title + metadata + counts per doc type.
+    Navigate to matter (via goto_matter), scrape title + metadata + counts per doc type.
     Returns MatterSummary with not_found=True if matter not found.
+    Caller owns the page; does not close it.
     """
     counts = {dt: 0 for dt in DOCUMENT_TYPES}
     metadata: dict[str, str] = {}
     title = ""
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-        )
-        page = context.new_page()
-
-        try:
-            frame, not_found = goto_matter(page, matter_number)
-            if not frame or not_found:
-                return MatterSummary(
-                    matter_id=matter_number,
-                    title="",
-                    counts=counts,
-                    metadata={"error": "Could not navigate or matter not found"},
-                    not_found=True,
-                )
-
-            # Scrape title - look for prominent heading or matter title area (use frame)
-            title_selectors = ["h1", "h2", '[class*="title" i]', '[class*="matter" i]', "td"]
-            for sel in title_selectors:
-                els = frame.locator(sel).all()
-                for el in els[:20]:  # limit scan
-                    try:
-                        t = el.inner_text().strip()
-                        if matter_number.upper() in t.upper() and len(t) < 200:
-                            title = t
-                            log.info("Found title via %s: %s", sel, title[:80])
-                            break
-                        if t and 10 < len(t) < 150 and not title:
-                            title = t
-                    except Exception:
-                        pass
-                if title:
-                    break
-
-            if not title:
-                title = f"Matter {matter_number}"
-                log.info("No explicit title found, using: %s", title)
-
-            # Scrape metadata (dates, category, amount) - look for label: value pairs
-            meta_pattern = re.compile(
-                r"(date|category|amount|status|filed|filing)\s*[:：]\s*(.+?)",
-                re.IGNORECASE,
-            )
-            for el in frame.locator("td, span, div, label, p").all()[:100]:
-                try:
-                    text = el.inner_text().strip()
-                    m = meta_pattern.search(text)
-                    if m:
-                        metadata[m.group(1).lower()] = m.group(2).strip()[:100]
-                except Exception:
-                    pass
-
-            if metadata:
-                log.info("Metadata found: %s", metadata)
-
-            # Tab discovery: buttons with "Label - N" pattern
-            tab_buttons = frame.locator("button").filter(has_text=re.compile(r".+\s-\s\d+"))
-            count = tab_buttons.count()
-            log.info("Tab buttons count: %d", count)
-
-            _TAB_COUNT_REGEX = re.compile(r"^(.*?)\s*-\s*(\d+)\s*$")
-            _LABEL_TO_DOC_TYPE = [
-                ("exhibit", "exhibits"),
-                ("key", "key_documents"),
-                ("other", "other_documents"),
-                ("transcript", "transcripts"),
-                ("record", "recordings"),
-            ]
-
-            discovered_tab_texts: list[str] = []
-            for i in range(min(count, 20)):
-                try:
-                    txt = tab_buttons.nth(i).inner_text().strip()
-                    txt = " ".join(txt.split())
-                    discovered_tab_texts.append(txt)
-                    m = _TAB_COUNT_REGEX.match(txt)
-                    if not m:
-                        continue
-                    label = m.group(1).strip()
-                    count_val = int(m.group(2))
-                    label_lower = label.lower()
-                    for keyword, doc_type in _LABEL_TO_DOC_TYPE:
-                        if keyword in label_lower:
-                            counts[doc_type] = count_val
-                            break
-                except Exception as e:
-                    log.debug("Tab button %d: %s", i, e)
-
-            log.info("Discovered tab button texts: %s", discovered_tab_texts)
-            log.info("Extracted counts per canonical type: %s", counts)
-
-            return MatterSummary(
-                matter_id=matter_number,
-                title=title,
-                counts=counts,
-                metadata=metadata,
-                not_found=False,
-            )
-
-        except Exception as e:
-            log.error("Navigation/scrape error: %s", e, exc_info=True)
+    try:
+        frame, not_found = goto_matter(page, matter_number)
+        if not frame or not_found:
             return MatterSummary(
                 matter_id=matter_number,
                 title="",
                 counts=counts,
-                metadata={"error": str(e)},
+                metadata={"error": "Could not navigate or matter not found"},
                 not_found=True,
             )
-        finally:
-            browser.close()
+
+        # Scrape title - look for prominent heading or matter title area (use frame)
+        title_selectors = ["h1", "h2", '[class*="title" i]', '[class*="matter" i]', "td"]
+        for sel in title_selectors:
+            els = frame.locator(sel).all()
+            for el in els[:20]:  # limit scan
+                try:
+                    t = el.inner_text().strip()
+                    if matter_number.upper() in t.upper() and len(t) < 200:
+                        title = t
+                        log.info("Found title via %s: %s", sel, title[:80])
+                        break
+                    if t and 10 < len(t) < 150 and not title:
+                        title = t
+                except Exception:
+                    pass
+            if title:
+                break
+
+        if not title:
+            title = f"Matter {matter_number}"
+            log.info("No explicit title found, using: %s", title)
+
+        # Scrape metadata (dates, category, amount) - look for label: value pairs
+        meta_pattern = re.compile(
+            r"(date|category|amount|status|filed|filing)\s*[:：]\s*(.+?)",
+            re.IGNORECASE,
+        )
+        for el in frame.locator("td, span, div, label, p").all()[:100]:
+            try:
+                text = el.inner_text().strip()
+                m = meta_pattern.search(text)
+                if m:
+                    metadata[m.group(1).lower()] = m.group(2).strip()[:100]
+            except Exception:
+                pass
+
+        if metadata:
+            log.info("Metadata found: %s", metadata)
+
+        # Tab discovery: buttons with "Label - N" pattern
+        tab_buttons = frame.locator("button").filter(has_text=re.compile(r".+\s-\s\d+"))
+        count = tab_buttons.count()
+        log.info("Tab buttons count: %d", count)
+
+        _TAB_COUNT_REGEX = re.compile(r"^(.*?)\s*-\s*(\d+)\s*$")
+        _LABEL_TO_DOC_TYPE = [
+            ("exhibit", "exhibits"),
+            ("key", "key_documents"),
+            ("other", "other_documents"),
+            ("transcript", "transcripts"),
+            ("record", "recordings"),
+        ]
+
+        discovered_tab_texts: list[str] = []
+        for i in range(min(count, 20)):
+            try:
+                txt = tab_buttons.nth(i).inner_text().strip()
+                txt = " ".join(txt.split())
+                discovered_tab_texts.append(txt)
+                m = _TAB_COUNT_REGEX.match(txt)
+                if not m:
+                    continue
+                label = m.group(1).strip()
+                count_val = int(m.group(2))
+                label_lower = label.lower()
+                for keyword, doc_type in _LABEL_TO_DOC_TYPE:
+                    if keyword in label_lower:
+                        counts[doc_type] = count_val
+                        break
+            except Exception as e:
+                log.debug("Tab button %d: %s", i, e)
+
+        log.info("Discovered tab button texts: %s", discovered_tab_texts)
+        log.info("Extracted counts per canonical type: %s", counts)
+
+        return MatterSummary(
+            matter_id=matter_number,
+            title=title,
+            counts=counts,
+            metadata=metadata,
+            not_found=False,
+        )
+
+    except Exception as e:
+        log.error("Navigation/scrape error: %s", e, exc_info=True)
+        return MatterSummary(
+            matter_id=matter_number,
+            title="",
+            counts=counts,
+            metadata={"error": str(e)},
+            not_found=True,
+        )
 
 
 def list_download_targets(
-    matter_number: str, document_type: str, limit: int = 10
+    page: Page, matter_number: str, document_type: str, limit: int = 10
 ) -> list[DownloadTarget]:
     """
-    Navigate to matter, select tab by document_type, collect up to limit
+    Navigate to matter (via goto_matter), select tab by document_type, collect up to limit
     items with "Go Get It". Return targets with name + selector for download.
+    Caller owns the page; does not close it.
     """
     targets: list[DownloadTarget] = []
     tab_label = DOC_TYPE_TO_TAB.get(document_type, document_type)
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-        )
-        page = context.new_page()
-
-        try:
-            frame, not_found = goto_matter(page, matter_number)
-            if not frame or not_found:
-                log.warning("Could not navigate to matter %s", matter_number)
-                return []
-
-            # Navigate to tab (robust locators)
-            tab_loc = frame.get_by_role("tab", name=re.compile(tab_label, re.I))
-            if tab_loc.count() == 0:
-                tab_loc = frame.get_by_text(tab_label, exact=True)
-            if tab_loc.count() == 0:
-                tab_loc = frame.get_by_text(re.compile(tab_label, re.I))
-
-            if tab_loc.count() > 0 and tab_loc.first.is_visible():
-                tab_loc.first.click()
-                log.info("Clicked tab: %s", tab_label)
-                page.wait_for_timeout(800)
-            else:
-                log.warning("Tab %s not found", tab_label)
-                return []
-
-            # Collect "Go Get It" using get_by_role (no brittle CSS)
-            go_get_it_links = frame.get_by_role("link", name="Go Get It")
-            go_get_it_btns = frame.get_by_role("button", name="Go Get It")
-            locs = list(go_get_it_links.all()) or list(go_get_it_btns.all())
-            log.info("Go Get It elements found: %d (links=%d, buttons=%d)",
-                     len(locs), go_get_it_links.count(), go_get_it_btns.count())
-
-            for i, loc in enumerate(locs[:limit]):
-                try:
-                    name = loc.inner_text().strip() or f"document_{i + 1}"
-                    # Store index for downloader to use frame.get_by_role(...).nth(i)
-                    targets.append(DownloadTarget(name=name, selector=str(i)))
-                except Exception as e:
-                    log.debug("Could not get name for item %d: %s", i, e)
-
-            log.info("Collected %d download targets for %s", len(targets), document_type)
-            return targets
-
-        except Exception as e:
-            log.error("list_download_targets error: %s", e, exc_info=True)
+    try:
+        frame, not_found = goto_matter(page, matter_number)
+        if not frame or not_found:
+            log.warning("Could not navigate to matter %s", matter_number)
             return []
-        finally:
-            browser.close()
+
+        # Navigate to tab (robust locators)
+        tab_loc = frame.get_by_role("tab", name=re.compile(tab_label, re.I))
+        if tab_loc.count() == 0:
+            tab_loc = frame.get_by_text(tab_label, exact=True)
+        if tab_loc.count() == 0:
+            tab_loc = frame.get_by_text(re.compile(tab_label, re.I))
+
+        if tab_loc.count() > 0 and tab_loc.first.is_visible():
+            tab_loc.first.click()
+            log.info("Clicked tab: %s", tab_label)
+            page.wait_for_timeout(800)
+        else:
+            log.warning("Tab %s not found", tab_label)
+            return []
+
+        # Collect "Go Get It" using get_by_role (no brittle CSS)
+        go_get_it_links = frame.get_by_role("link", name="Go Get It")
+        go_get_it_btns = frame.get_by_role("button", name="Go Get It")
+        locs = list(go_get_it_links.all()) or list(go_get_it_btns.all())
+        log.info("Go Get It elements found: %d (links=%d, buttons=%d)",
+                 len(locs), go_get_it_links.count(), go_get_it_btns.count())
+
+        for i, loc in enumerate(locs[:limit]):
+            try:
+                name = loc.inner_text().strip() or f"document_{i + 1}"
+                # Store index for downloader to use frame.get_by_role(...).nth(i)
+                targets.append(DownloadTarget(name=name, selector=str(i)))
+            except Exception as e:
+                log.debug("Could not get name for item %d: %s", i, e)
+
+        log.info("Collected %d download targets for %s", len(targets), document_type)
+        return targets
+
+    except Exception as e:
+        log.error("list_download_targets error: %s", e, exc_info=True)
+        return []
